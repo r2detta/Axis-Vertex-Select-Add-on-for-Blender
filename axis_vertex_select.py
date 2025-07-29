@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Axis Vertex Select",
     "author": "r2detta",
-    "version": (1, 2),
+    "version": (1, 2, 2),  # Version bumped to reflect new Snap to Middle feature
     "blender": (4, 3, 0),
     "location": "View3D > Tool Panel",
     "description": "Select vertices based on world axis and perform symmetry operations",
@@ -173,30 +173,40 @@ class OBJECT_OT_SnapToSymmetry(bpy.types.Operator):
         for sel_vert in selected_verts:
             sel_world_co = obj.matrix_world @ sel_vert.co
             
+            # Karşı taraftaki ideal konum (mirrored position)
             mirrored_co = sel_world_co.copy()
             mirrored_co[axis_idx] *= -1
             
             closest_vert = None
             min_distance = float('inf')
             
+            # Tüm vertexler arasında karşı tarafta olanlara bakalım
             for other_vert in all_verts:
                 if other_vert == sel_vert or other_vert.select:
                     continue
                 
                 other_world_co = obj.matrix_world @ other_vert.co
                 
+                # Sadece karşı tarafta olan vertexleri kontrol edelim
                 if (sel_world_co[axis_idx] * other_world_co[axis_idx]) >= 0:
                     continue
                 
-                distance = 0
+                # İdeal simetrik konuma olan mesafeyi hesaplayalım (tüm eksenleri dikkate alarak)
+                total_distance = 0
                 for i in range(3):
-                    if i != axis_idx:
-                        distance += (mirrored_co[i] - other_world_co[i]) ** 2
-                distance = math.sqrt(distance)
+                    diff = abs(mirrored_co[i] - other_world_co[i])
+                    # Tüm eksenlerdeki farklar threshold değerinden küçük olmalı
+                    if diff > threshold:
+                        total_distance = float('inf')  # Threshold'u geçen herhangi bir eksen olursa, bu vertex uygun değil
+                        break
+                    total_distance += diff * diff  # Euclidean mesafe hesabı için kare toplamı
                 
-                if distance < min_distance and distance <= threshold:
-                    min_distance = distance
-                    closest_vert = other_vert
+                # Eğer tüm eksenler için fark threshold içindeyse, toplam mesafeyi kullan
+                if total_distance < float('inf'):
+                    distance = math.sqrt(total_distance)
+                    if distance < min_distance:
+                        min_distance = distance
+                        closest_vert = other_vert
             
             if closest_vert:
                 other_world_co = obj.matrix_world @ closest_vert.co
@@ -213,6 +223,50 @@ class OBJECT_OT_SnapToSymmetry(bpy.types.Operator):
         bmesh.update_edit_mesh(mesh)
         
         self.report({'INFO'}, f"Snapped {matched_count} vertices. {unmatched_count} vertices had no match within threshold.")
+        return {'FINISHED'}
+
+
+class OBJECT_OT_SnapToMiddle(bpy.types.Operator):
+    bl_idname = "object.snap_to_middle"
+    bl_label = "Snap to Middle"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        props = scene.axis_select_props
+        obj = context.edit_object
+
+        if not obj:
+            self.report({'ERROR'}, "No object in edit mode!")
+            return {'CANCELLED'}
+
+        mesh = obj.data
+        bm = bmesh.from_edit_mesh(mesh)
+        
+        selected_verts = [v for v in bm.verts if v.select]
+        
+        if not selected_verts:
+            self.report({'WARNING'}, "No vertices selected!")
+            return {'CANCELLED'}
+        
+        axis_idx = {'X': 0, 'Y': 1, 'Z': 2}[props.sym_axis]
+        snapped_count = 0
+        
+        for vert in selected_verts:
+            world_co = obj.matrix_world @ vert.co
+            
+            # Seçili eksende koordinatı 0'a ayarla
+            new_world_co = world_co.copy()
+            new_world_co[axis_idx] = 0.0
+            
+            # Dünya koordinatlarını yerel koordinatlara çevir
+            new_local_co = obj.matrix_world.inverted() @ Vector(new_world_co)
+            vert.co = new_local_co
+            snapped_count += 1
+        
+        bmesh.update_edit_mesh(mesh)
+        
+        self.report({'INFO'}, f"Snapped {snapped_count} vertices to middle (axis {props.sym_axis}).")
         return {'FINISHED'}
 
 
@@ -272,12 +326,14 @@ class VIEW3D_PT_AxisSelect(bpy.types.Panel):
         box.prop(props, "sym_axis", text="Mirror Axis")
         box.prop(props, "sym_threshold")
         box.operator("object.snap_to_symmetry", text="Snap to Symmetry")
+        box.operator("object.snap_to_middle", text="Snap to Middle")
 
 def register():
     bpy.utils.register_class(AxisSelectProperties)
     bpy.utils.register_class(OBJECT_OT_SelectAxisVertices)
     bpy.utils.register_class(OBJECT_OT_SelectCenterVertices)
     bpy.utils.register_class(OBJECT_OT_SnapToSymmetry)
+    bpy.utils.register_class(OBJECT_OT_SnapToMiddle)
     bpy.utils.register_class(VIEW3D_PT_AxisSelect)
     bpy.types.Scene.axis_select_props = bpy.props.PointerProperty(type=AxisSelectProperties)
 
@@ -286,6 +342,7 @@ def unregister():
     bpy.utils.unregister_class(OBJECT_OT_SelectAxisVertices)
     bpy.utils.unregister_class(OBJECT_OT_SelectCenterVertices)
     bpy.utils.unregister_class(OBJECT_OT_SnapToSymmetry)
+    bpy.utils.unregister_class(OBJECT_OT_SnapToMiddle)
     bpy.utils.unregister_class(VIEW3D_PT_AxisSelect)
     del bpy.types.Scene.axis_select_props
 
